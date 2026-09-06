@@ -44,6 +44,8 @@ jobs:
           cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
           # 应用编译配置
           cp $GITHUB_WORKSPACE/.config .config
+          # 复制自定义文件(IP 配置等)
+          [ -d $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./
           # 更新 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
@@ -70,3 +72,16 @@ jobs:
             source/bin/targets/mediatek/filogic/*.buildinfo
             source/bin/targets/mediatek/filogic/*.manifest
           retention-days: 30
+
+      - name: Create Release
+        run: |
+          TAG="build-$(date +%Y%m%d-%H%M)"
+          gh release create "$TAG" \
+            source/bin/targets/mediatek/filogic/*.bin \
+            source/bin/targets/mediatek/filogic/*.buildinfo \
+            --title "Firmware build $(date +%Y-%m-%d)" \
+            --notes "Automated build from master branch." \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        timeout-minutes: 5
