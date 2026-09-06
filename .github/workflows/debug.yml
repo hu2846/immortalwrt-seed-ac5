@@ -49,7 +49,22 @@ jobs:
       - name: Run defconfig
         run: |
           cd source
-          make defconfig 2>&1 | tail -30
+          make defconfig 2>&1 | tee /tmp/defconfig.log | tail -30
+
+      - name: Find recursive dependency packages
+        run: |
+          cd source
+          echo "=== 递归依赖对应的包 ==="
+          grep -oP 'config-package\.in:\K[0-9]+' /tmp/defconfig.log | sort -u | while read ln; do
+            pkg=$(awk -v t="$ln" 'NR<=t && /^config PACKAGE_/ {n=$2} NR==t {print n; exit}' tmp/.config-package.in)
+            echo "  行 $ln -> ${pkg:-未知}"
+          done
+          echo ""
+          echo "=== 这些包当前是否启用 ==="
+          grep -oP 'config-package\.in:\K[0-9]+' /tmp/defconfig.log | sort -u | while read ln; do
+            pkg=$(awk -v t="$ln" 'NR<=t && /^config PACKAGE_/ {n=$2} NR==t {print n; exit}' tmp/.config-package.in)
+            [ -n "$pkg" ] && grep -E "^${pkg}=" .config || true
+          done
 
       - name: After defconfig
         run: |
