@@ -9,6 +9,9 @@ on:
       - 'feeds.conf.default'
       - '.github/workflows/build.yml'
       - 'files/**'
+
+permissions:
+  contents: write
   schedule:
     - cron: '0 0 * * *'  # 每天 UTC 0 点检查上游更新(北京时间 8:00)
 
@@ -79,14 +82,16 @@ jobs:
           retention-days: 30
 
       - name: Create Release
-        run: |
-          TAG="build-$(date +%Y%m%d-%H%M)"
-          gh release create "$TAG" \
-            source/bin/targets/mediatek/filogic/*.bin \
-            source/bin/targets/mediatek/filogic/*.buildinfo \
-            --title "Firmware build $(date +%Y-%m-%d)" \
-            --notes "Automated build from master branch." \
-            --generate-notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        timeout-minutes: 5
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_id }}
+          name: Firmware build ${{ github.run_id }}
+          body: |
+            Automated build triggered by ${{ github.event_name }}.
+            - Commit: ${{ github.sha }}
+            - Date: ${{ github.event.head_commit.timestamp || github.event.client_payload.created_at || 'manual' }}
+          files: |
+            source/bin/targets/mediatek/filogic/*.bin
+            source/bin/targets/mediatek/filogic/*.buildinfo
+          generate_release_notes: true
+          make_latest: true
