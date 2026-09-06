@@ -1,0 +1,86 @@
+name: Debug Config
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout config
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update -qq
+          sudo apt install -y -qq build-essential ccache clang cmake curl \
+            ecj fastjar file g++ gawk gettext git \
+            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+            python3 python3-docutils python3-setuptools rsync swig time \
+            unzip wget zlib1g-dev qemu-utils
+
+      - name: Clone source
+        run: |
+          git clone -b 25.12.0-rc2 --single-branch https://github.com/BeeconMini/immortalwrt.git source
+          cd source
+          cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
+          cp $GITHUB_WORKSPACE/.config .config
+
+      - name: Before defconfig
+        run: |
+          cd source
+          echo "=== defconfig 前 ==="
+          echo "总行数: $(wc -l < .config)"
+          echo "PACKAGE 启用数: $(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config)"
+          echo "luci-app 启用数: $(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config)"
+          echo "kmod 启用数: $(grep -cE '^CONFIG_PACKAGE_kmod-[a-z0-9._-]+=y' .config)"
+
+      - name: Update feeds
+        run: |
+          cd source
+          ./scripts/feeds update -a 2>&1 | tail -30
+          echo "=== feeds 目录 ==="
+          ls feeds/
+          echo "=== feeds install ==="
+          ./scripts/feeds install -a 2>&1 | tail -20
+
+      - name: Run defconfig
+        run: |
+          cd source
+          make defconfig 2>&1 | tail -30
+
+      - name: After defconfig
+        run: |
+          cd source
+          echo "=== defconfig 后 ==="
+          echo "总行数: $(wc -l < .config)"
+          echo "PACKAGE 启用数: $(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config)"
+          echo "luci-app 启用数: $(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config)"
+          echo "kmod 启用数: $(grep -cE '^CONFIG_PACKAGE_kmod-[a-z0-9._-]+=y' .config)"
+          echo ""
+          echo "=== 关键包核对 ==="
+          for p in luci-app-dockerman luci-app-homeproxy luci-app-nikki nikki dockerd mwan3 luci-app-mwan3; do
+            if grep -qE "^CONFIG_PACKAGE_$p=y" .config; then
+              echo "  [保留] $p"
+            else
+              echo "  [丢失] $p"
+            fi
+          done
+          echo ""
+          echo "=== 保留的 luci-app 列表 ==="
+          grep -E '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config | sed 's/^CONFIG_PACKAGE_//;s/=y$//' || echo "  (无)"
+
+      - name: Check feeds availability
+        run: |
+          cd source
+          echo "=== 检查关键包在 feeds 中是否存在 ==="
+          for p in luci-app-dockerman luci-app-homeproxy luci-app-nikki nikki; do
+            found=$(find feeds -maxdepth 3 -type d -name "$p" 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+              echo "  [存在] $p -> $found"
+            else
+              echo "  [不存在] $p"
+            fi
+          done
