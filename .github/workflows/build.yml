@@ -10,10 +10,11 @@ on:
       - '.github/workflows/build.yml'
       - 'files/**'
 
-permissions:
-  contents: write
   schedule:
     - cron: '0 0 * * *'  # 每天 UTC 0 点检查上游更新(北京时间 8:00)
+
+permissions:
+  contents: write
 
 env:
   REPO_URL: https://github.com/BeeconMini/immortalwrt.git
