@@ -44,20 +44,60 @@
 | `luci-app-diskman` | 磁盘管理 | 磁盘分区与管理 |
 | `luci-app-filebrowser` | 文件管理 | Web 文件管理器 |
 
-### 已取消的插件(可在 .config 中重新启用)
-
-| 包名 | 中文名 | 取消原因 |
-|---|---|---|
-| `luci-app-smartdns` | SmartDNS | 由 HomeProxy 替代 |
-| `luci-app-passwall` | PassWall | 由 HomeProxy/Nikki 替代 |
-| `luci-app-csshnpd` | NoPorts 远程管理 | 不需要 |
-| `luci-app-ssr-plus` | SSR Plus | 由 HomeProxy/Nikki 替代 |
-| `luci-app-turboacc` | Turbo ACC | 新版 feeds 不可用,已启用 nft-offload 替代 |
-
 ### 网络加速
 
 - 软件流量卸载: `kmod-nft-offload` + `kmod-nf-flow` (已启用)
 - 硬件 NAT: 由 MT7981 内核驱动自动支持
+
+## 编译环境
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | **Ubuntu 22.04 LTS**(推荐) |
+| CPU | 4 核以上,建议 8 核 |
+| 内存 | 8G 以上,建议 16G |
+| 磁盘 | **至少 150G**,建议 250G |
+| 网络 | 需能访问 GitHub 和境外源 |
+
+磁盘建议单独挂载,避免系统盘被编译产物撑爆(完整编译约占用 70G)。
+
+### 编译依赖
+
+完整依赖列表(约 300+ 个包):
+
+```bash
+sudo apt update
+sudo apt install -y build-essential ccache clang cmake curl \
+  ecj fastjar file g++ gawk gettext git \
+  libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+  python3 python3-docutils python3-setuptools rsync swig time \
+  unzip wget zlib1g-dev qemu-utils \
+  bzip2 autoconf automake bison flex gperf libtool \
+  lld llvm ninja-build pkgconf texinfo zstd
+```
+
+### 编译步骤
+
+```bash
+# 1. 拉取源码
+git clone -b 25.12.0-rc2 --single-branch https://github.com/BeeconMini/immortalwrt.git
+cd immortalwrt
+
+# 2. 应用配置
+cp /path/to/this/repo/.config .config
+cp /path/to/this/repo/feeds.conf.default feeds.conf.default
+
+# 3. 更新 feeds
+./scripts/feeds update -a
+./scripts/feeds install -a
+make defconfig
+
+# 4. 编译
+make -j$(nproc) download    # 先下载源码包
+make -j$(nproc) V=s         # 开始编译(首次约 3-8 小时)
+```
+
+编译产物位于 `bin/targets/mediatek/filogic/`。
 
 ## 如何修改配置
 
