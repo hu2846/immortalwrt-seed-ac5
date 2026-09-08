@@ -46,6 +46,13 @@ jobs:
           echo "=== feeds install ==="
           ./scripts/feeds install -a 2>&1 | tail -20
 
+      - name: Remove broken packages from small feed (test)
+        run: |
+          cd source
+          for p in webd alist luci-app-alist luci-app-ua2f luci-app-torbp minieap kmod-oaf luci-app-fchomo luci-app-nat6-helper natmap; do
+            if [ -d "feeds/small/$p" ]; then rm -rf "feeds/small/$p"; echo "removed feeds/small/$p"; fi
+          done
+
       - name: Run defconfig
         run: |
           cd source
