@@ -58,19 +58,29 @@ jobs:
           # 更新 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          make defconfig 2>&1 | tee defconfig.log
+          # 配置收敛: 历史 .config 单次 defconfig 会静默丢弃大部分已选包(固件缩水到28MB),
+          # 反复"从原始 .config 补回缺失的 =y 并 defconfig"直至稳定, 得到规范化配置。
+          PREV=-1
+          for i in 1 2 3 4 5 6 7 8; do
+            grep -hE '^CONFIG_PACKAGE_[^ =]+=y' $GITHUB_WORKSPACE/.config | while IFS= read -r line; do
+              sym="${line%%=*}"
+              if ! grep -qE "^${sym}=y$|^${sym}=m$" .config; then
+                echo "$line" >> .config
+              fi
+            done
+            make defconfig >/dev/null 2>&1
+            N=$(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config || true)
+            echo "第 $i 轮后 PACKAGE=y: $N"
+            if [ "$N" -eq "$PREV" ]; then echo "配置已收敛"; break; fi
+            PREV=$N
+          done
 
       - name: Validate config (防配置丢失回归)
         run: |
           cd source
-          if grep -q "recursive dependency detected" defconfig.log; then
-            echo "::error::Kconfig 递归依赖错误: feeds 中存在坏包/重复包, 已导致配置丢失"
-            grep -B1 -A2 "recursive dependency detected" defconfig.log | head -40
-            exit 1
-          fi
           PKGS=$(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config || true)
           LUCI=$(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config || true)
-          echo "defconfig 后有效包数: $PKGS, luci-app 数: $LUCI"
+          echo "收敛后有效包数: $PKGS, luci-app 数: $LUCI"
           if [ "$PKGS" -lt 430 ]; then
             echo "::error::defconfig 后包数异常($PKGS < 430), 疑似配置被静默丢弃, 终止构建"
             exit 1
@@ -79,6 +89,13 @@ jobs:
             echo "::error::defconfig 后 luci-app 数异常($LUCI < 20), 终止构建"
             exit 1
           fi
+          for p in luci-app-dockerman luci-app-mwan3 nikki mwan3 dockerd; do
+            if ! grep -qE "^CONFIG_PACKAGE_$p=y" .config; then
+              echo "::error::关键包 $p 未保留!"
+              exit 1
+            fi
+          done
+          echo "关键包全部保留 ✓"
 
       - name: Download source packages
         run: |
