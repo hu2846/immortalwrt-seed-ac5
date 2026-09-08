@@ -46,17 +46,30 @@ jobs:
           echo "=== feeds install ==="
           ./scripts/feeds install -a 2>&1 | tail -20
 
-      - name: Remove broken packages from small feed (test)
+      - name: Remove broken packages from small feed (disabled for this forensics run)
         run: |
           cd source
-          for p in webd alist luci-app-alist luci-app-ua2f luci-app-torbp minieap kmod-oaf luci-app-fchomo luci-app-nat6-helper natmap; do
-            if [ -d "feeds/small/$p" ]; then rm -rf "feeds/small/$p"; echo "removed feeds/small/$p"; fi
-          done
+          echo "(removal step disabled)"
 
       - name: Run defconfig
         run: |
           cd source
           make defconfig 2>&1 | tee /tmp/defconfig.log | tail -30
+
+      - name: Config forensics
+        run: |
+          cd source
+          echo "=== 取证 ==="
+          echo "config-package.in 总行数: $(wc -l < tmp/.config-package.in 2>/dev/null)"
+          echo "package.in 中 config PACKAGE_ 总数: $(grep -c '^config PACKAGE_' tmp/.config-package.in 2>/dev/null)"
+          echo "package.in 中 luci-app 总数: $(grep -cE '^config PACKAGE_luci-app-' tmp/.config-package.in 2>/dev/null)"
+          for p in luci-app-dockerman nikki luci-app-homeproxy luci-app-firewall luci-app-package-manager luci-app-mwan3 mwan3 dockerd; do
+            echo "package.in 含 $p : $(grep -cE "config PACKAGE_${p}$|config PACKAGE_${p}\b" tmp/.config-package.in 2>/dev/null)"
+          done
+          echo "package/feeds 目录: $(ls package/feeds 2>/dev/null | wc -l) 项"
+          ls package/feeds 2>/dev/null | head -20
+          echo ".config 中 dockerman 行: $(grep -cE '^CONFIG_PACKAGE_luci-app-dockerman' .config)"
+          echo "make 版本: $(make --version | head -1)"
 
       - name: Find recursive dependency packages
         run: |
