@@ -6,7 +6,7 @@ on:
 jobs:
   diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout config
@@ -31,7 +31,6 @@ jobs:
       - name: Before defconfig
         run: |
           cd source
-          echo "=== defconfig 前 ==="
           echo "总行数: $(wc -l < .config)"
           echo "PACKAGE 启用数: $(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config)"
           echo "luci-app 启用数: $(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config)"
@@ -46,71 +45,27 @@ jobs:
           echo "=== feeds install ==="
           ./scripts/feeds install -a 2>&1 | tail -20
 
-      - name: Remove broken packages from small feed (disabled for this forensics run)
+      - name: Converge config (与 build.yml 同款收敛循环)
         run: |
           cd source
-          echo "(removal step disabled)"
-
-      - name: Run defconfig
-        run: |
-          cd source
-          make defconfig 2>&1 | tee /tmp/defconfig.log | tail -30
-
-      - name: Retry force-select test (关键实验)
-        run: |
-          cd source
-          echo "=== 第一次 defconfig 后关键包 ==="
-          for p in luci-app-dockerman luci-app-mwan3 luci-app-nikki nikki mwan3 dockerd luci-app-firewall; do
-            echo "  $p : $(grep -cE "^CONFIG_PACKAGE_$p=y" .config)"
-          done
-          echo "=== 强制重新勾选并再次 defconfig ==="
-          for p in luci-app-dockerman luci-app-mwan3 luci-app-nikki nikki mwan3 dockerd; do
-            grep -qE "^CONFIG_PACKAGE_$p=y" .config || echo "CONFIG_PACKAGE_$p=y" >> .config
-          done
-          # 去掉可能被写入的 is-not-set 反选
-          sed -i '/# CONFIG_PACKAGE_luci-app-dockerman is not set/d;/# CONFIG_PACKAGE_luci-app-mwan3 is not set/d;/# CONFIG_PACKAGE_luci-app-nikki is not set/d;/# CONFIG_PACKAGE_nikki is not set/d;/# CONFIG_PACKAGE_mwan3 is not set/d;/# CONFIG_PACKAGE_dockerd is not set/d' .config
-          make defconfig 2>&1 | tee /tmp/defconfig2.log | tail -15
-          echo "=== 第二次 defconfig 后关键包 ==="
-          for p in luci-app-dockerman luci-app-mwan3 luci-app-nikki nikki mwan3 dockerd luci-app-firewall; do
-            echo "  $p : $(grep -cE "^CONFIG_PACKAGE_$p=y" .config)"
-          done
-          echo "luci-app 总数(第2次后): $(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config)"
-          echo "递归错误数(第2次): $(grep -c 'recursive dependency detected' /tmp/defconfig2.log)"
-
-      - name: Config forensics
-        run: |
-          cd source
-          echo "=== 取证 ==="
-          echo "config-package.in 总行数: $(wc -l < tmp/.config-package.in 2>/dev/null)"
-          echo "package.in 中 config PACKAGE_ 总数: $(grep -c '^config PACKAGE_' tmp/.config-package.in 2>/dev/null)"
-          echo "package.in 中 luci-app 总数: $(grep -cE '^config PACKAGE_luci-app-' tmp/.config-package.in 2>/dev/null)"
-          for p in luci-app-dockerman nikki luci-app-homeproxy luci-app-firewall luci-app-package-manager luci-app-mwan3 mwan3 dockerd; do
-            echo "package.in 含 $p : $(grep -cE "config PACKAGE_${p}$|config PACKAGE_${p}\b" tmp/.config-package.in 2>/dev/null)"
-          done
-          echo "package/feeds 目录: $(ls package/feeds 2>/dev/null | wc -l) 项"
-          ls package/feeds 2>/dev/null | head -20
-          echo ".config 中 dockerman 行: $(grep -cE '^CONFIG_PACKAGE_luci-app-dockerman' .config)"
-          echo "make 版本: $(make --version | head -1)"
-
-      - name: Find recursive dependency packages
-        run: |
-          cd source
-          echo "=== 递归依赖对应的包 ==="
-          grep -oP 'config-package\.in:\K[0-9]+' /tmp/defconfig.log | sort -u | while read ln; do
-            pkg=$(awk -v t="$ln" 'NR<=t && /^config PACKAGE_/ {n=$2} NR==t {print n; exit}' tmp/.config-package.in)
-            echo "  行 $ln -> ${pkg:-未知}"
-          done
-          echo ""
-          echo "=== 这些包当前是否启用 ==="
-          grep -oP 'config-package\.in:\K[0-9]+' /tmp/defconfig.log | sort -u | while read ln; do
-            pkg=$(awk -v t="$ln" 'NR<=t && /^config PACKAGE_/ {n=$2} NR==t {print n; exit}' tmp/.config-package.in)
-            [ -n "$pkg" ] && grep -E "^${pkg}=" .config || true
+          PREV=-1
+          for i in 1 2 3 4 5 6 7 8; do
+            grep -hE '^CONFIG_PACKAGE_[^ =]+=y' $GITHUB_WORKSPACE/.config | while IFS= read -r line; do
+              sym="${line%%=*}"
+              if ! grep -qE "^${sym}=y$|^${sym}=m$" .config; then
+                echo "$line" >> .config
+              fi
+            done
+            make defconfig >/dev/null 2>&1
+            N=$(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config || true)
+            echo "第 $i 轮后 PACKAGE=y: $N"
+            if [ "$N" -eq "$PREV" ]; then echo "配置已收敛"; break; fi
+            PREV=$N
           done
 
       - name: After defconfig
         run: |
           cd source
-          echo "=== defconfig 后 ==="
           echo "总行数: $(wc -l < .config)"
           echo "PACKAGE 启用数: $(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config)"
           echo "luci-app 启用数: $(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config)"
