@@ -56,6 +56,27 @@ jobs:
           cd source
           make defconfig 2>&1 | tee /tmp/defconfig.log | tail -30
 
+      - name: Retry force-select test (关键实验)
+        run: |
+          cd source
+          echo "=== 第一次 defconfig 后关键包 ==="
+          for p in luci-app-dockerman luci-app-mwan3 luci-app-nikki nikki mwan3 dockerd luci-app-firewall; do
+            echo "  $p : $(grep -cE "^CONFIG_PACKAGE_$p=y" .config)"
+          done
+          echo "=== 强制重新勾选并再次 defconfig ==="
+          for p in luci-app-dockerman luci-app-mwan3 luci-app-nikki nikki mwan3 dockerd; do
+            grep -qE "^CONFIG_PACKAGE_$p=y" .config || echo "CONFIG_PACKAGE_$p=y" >> .config
+          done
+          # 去掉可能被写入的 is-not-set 反选
+          sed -i '/# CONFIG_PACKAGE_luci-app-dockerman is not set/d;/# CONFIG_PACKAGE_luci-app-mwan3 is not set/d;/# CONFIG_PACKAGE_luci-app-nikki is not set/d;/# CONFIG_PACKAGE_nikki is not set/d;/# CONFIG_PACKAGE_mwan3 is not set/d;/# CONFIG_PACKAGE_dockerd is not set/d' .config
+          make defconfig 2>&1 | tee /tmp/defconfig2.log | tail -15
+          echo "=== 第二次 defconfig 后关键包 ==="
+          for p in luci-app-dockerman luci-app-mwan3 luci-app-nikki nikki mwan3 dockerd luci-app-firewall; do
+            echo "  $p : $(grep -cE "^CONFIG_PACKAGE_$p=y" .config)"
+          done
+          echo "luci-app 总数(第2次后): $(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config)"
+          echo "递归错误数(第2次): $(grep -c 'recursive dependency detected' /tmp/defconfig2.log)"
+
       - name: Config forensics
         run: |
           cd source
