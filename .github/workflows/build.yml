@@ -58,7 +58,27 @@ jobs:
           # 更新 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          make defconfig
+          make defconfig 2>&1 | tee defconfig.log
+
+      - name: Validate config (防配置丢失回归)
+        run: |
+          cd source
+          if grep -q "recursive dependency detected" defconfig.log; then
+            echo "::error::Kconfig 递归依赖错误: feeds 中存在坏包/重复包, 已导致配置丢失"
+            grep -B1 -A2 "recursive dependency detected" defconfig.log | head -40
+            exit 1
+          fi
+          PKGS=$(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config || true)
+          LUCI=$(grep -cE '^CONFIG_PACKAGE_luci-app-[a-z0-9-]+=y' .config || true)
+          echo "defconfig 后有效包数: $PKGS, luci-app 数: $LUCI"
+          if [ "$PKGS" -lt 430 ]; then
+            echo "::error::defconfig 后包数异常($PKGS < 430), 疑似配置被静默丢弃, 终止构建"
+            exit 1
+          fi
+          if [ "$LUCI" -lt 20 ]; then
+            echo "::error::defconfig 后 luci-app 数异常($LUCI < 20), 终止构建"
+            exit 1
+          fi
 
       - name: Download source packages
         run: |
