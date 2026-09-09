@@ -24,7 +24,9 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # 2026-09-10: x86(2核)冷构建约需6.5h > 300min步骤/360min任务上限(曾两次超时),
+    # 换 ARM 4核 runner(免费, 公共仓库可用)提速约一倍; ubuntu-24.04 无 libncurses5-dev
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
 
     steps:
@@ -36,9 +38,10 @@ jobs:
           sudo apt update -qq
           sudo apt install -y -qq build-essential ccache clang cmake curl \
             ecj fastjar file g++ gawk gettext git \
-            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+            libelf-dev libncurses-dev libssl-dev \
             python3 python3-docutils python3-setuptools rsync swig time \
             unzip wget zlib1g-dev qemu-utils
+          echo "runner arch: $(uname -m), nproc: $(nproc), mem: $(free -h | awk '/Mem/{print $2}')"
 
       - name: Free disk space
         run: |
@@ -113,7 +116,7 @@ jobs:
         run: |
           cd source
           make -j$(nproc) V=s
-        timeout-minutes: 300
+        timeout-minutes: 330
 
       - name: Rename firmware (型号-版本命名)
         run: |
