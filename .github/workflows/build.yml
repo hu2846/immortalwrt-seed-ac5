@@ -58,9 +58,12 @@ jobs:
           # 更新 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 应用 libffi 补丁: 上游 InstallDev 复制 fficonfig.h 的路径 glob 失效导致编译失败
-          mkdir -p feeds/packages/libs/libffi/patches
-          cp $GITHUB_WORKSPACE/scripts/libffi-fficonfig.patch feeds/packages/libs/libffi/patches/001-fallback-fficonfig.patch
+          # 修复 libffi feed: 上游 InstallDev 复制 fficonfig.h 的 $(GNU_TARGET_NAME)* glob
+          # 在 3.4.7 布局下匹配不到(历史两次编译失败均因此)。直接改 feed 的 Makefile,
+          # 用 find 兜底定位 fficonfig.h。
+          # 注意: 不可做成 feeds/.../libffi/patches/*.patch —— 那会被打进 libffi 源码树
+          # (run 34358095685 教训: 畸形补丁致 host prepare 的 patch 失败, 全盘编译中止)
+          python3 $GITHUB_WORKSPACE/scripts/fix-libffi-makefile.py feeds/packages/libs/libffi/Makefile
           # 配置收敛: 历史 .config 单次 defconfig 会静默丢弃大部分已选包(固件缩水到28MB),
           # 反复"从原始 .config 补回缺失的 =y 并 defconfig"直至稳定, 得到规范化配置。
           PREV=-1

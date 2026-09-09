@@ -1,5 +1,5 @@
 # 官方源不固定版本: 固定到 2026-04 会得到 rust 1.94(其 CI LLVM 下载已404过期)导致编译失败,
-# 跟随 HEAD 的 rust 1.96 正常。libffi 上游 bug 已由 scripts/libffi-fficonfig.patch 修复。
+# 跟随 HEAD 的 rust 1.96 正常。libffi 上游 glob 问题由 build.yml 内 scripts/fix-libffi-makefile.py 修复。
 src-git packages https://github.com/immortalwrt/packages.git
 src-git luci https://github.com/immortalwrt/luci.git
 src-git routing https://github.com/openwrt/routing.git
