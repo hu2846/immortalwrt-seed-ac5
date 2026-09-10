@@ -29,9 +29,11 @@ env:
 
 jobs:
   build:
-    # 2026-09-10: 回到 x86(ubuntu-22.04) 平台, 通过"多层缓存(dl/ccache/staging)+启用 CONFIG_CCACHE
-    # +移除触发 Rust 工具链的孤儿包"解决原先冷构建超时问题, 不再使用 ARM runner。
-    runs-on: ubuntu-22.04
+    # 2026-09-11: 改用 ubuntu-24.04 —— Codespace(studious-carnival, Ubuntu 24.04.4 / glibc 2.38 / gcc 13)
+    # 预热的 staging_dir/host 工具链是在 24.04 上编译的, 在 22.04(glibc 2.35) 上会全部报
+    # "sed/find/xargs: version `GLIBC_2.38' not found" → 连 make defconfig 都跑不通(包数=0)。
+    # 切到 24.04 让 glibc/gcc 与预热缓存一致, ccache 才可能命中。
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
@@ -43,9 +45,11 @@ jobs:
           sudo apt update -qq
           sudo apt install -y -qq build-essential ccache clang cmake curl \
             ecj fastjar file g++ gawk gettext git \
-            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+            libelf-dev libncurses-dev libssl-dev \
             python3 python3-docutils python3-setuptools rsync swig time \
             unzip wget zlib1g-dev qemu-utils zstd
+          # 24.04 上 libncurses5-dev/libncursesw5-dev 已移除, 装不上不影响构建
+          sudo apt install -y -qq libncurses5-dev libncursesw5-dev 2>/dev/null || true
           echo "runner arch: $(uname -m), nproc: $(nproc), mem: $(free -h | awk '/Mem/{print $2}')"
           ccache --version | head -1
 
@@ -70,28 +74,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: source/dl
-          key: dl-${{ hashFiles('feeds.conf.default') }}-${{ github.run_number }}
+          key: u2404-dl-${{ hashFiles('feeds.conf.default') }}-${{ github.run_number }}
           restore-keys: |
-            dl-${{ hashFiles('feeds.conf.default') }}-
-            dl-
+            u2404-dl-${{ hashFiles('feeds.conf.default') }}-
+            u2404-dl-
 
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: source/.ccache
-          key: ccache-${{ hashFiles('.config', 'feeds.conf.default') }}-${{ github.run_number }}
+          key: u2404-ccache-${{ hashFiles('.config', 'feeds.conf.default') }}-${{ github.run_number }}
           restore-keys: |
-            ccache-${{ hashFiles('.config', 'feeds.conf.default') }}-
-            ccache-
+            u2404-ccache-${{ hashFiles('.config', 'feeds.conf.default') }}-
+            u2404-ccache-
 
       - name: Restore staging_dir
         uses: actions/cache@v4
         with:
           path: source/staging_dir
-          key: staging-${{ hashFiles('.config', 'feeds.conf.default') }}-${{ github.run_number }}
+          key: u2404-staging-${{ hashFiles('.config', 'feeds.conf.default') }}-${{ github.run_number }}
           restore-keys: |
-            staging-${{ hashFiles('.config', 'feeds.conf.default') }}-
-            staging-
+            u2404-staging-${{ hashFiles('.config', 'feeds.conf.default') }}-
+            u2404-staging-
 
       # ---- 从 Release 资产恢复 Codespace 预热缓存(优先于 actions/cache, 解包后覆盖) ----
       # 预热脚本: scripts/codespace-prepare-cache.sh (在 Codespace 里跑一次即可)
@@ -213,7 +217,54 @@ jobs:
           make -j$(nproc) V=s
           echo "=== ccache 统计 ==="
           ccache -s || true
-        timeout-minutes: 345
+        # 单 job 硬上限 360min, 留 ~35min 给下面"失败也存热缓存"的步骤
+        timeout-minutes: 320
+
+      # ---- 失败/超时也保存热缓存(自我累积) ----
+      # 目的: 冷构建在 4 核 runner 上 >6h 必然超时。让每次失败都留下
+      # staging_dir/.ccache/dl 的完整快照, 下次运行从"上次跑到哪"继续, 逐轮收敛到构建成功。
+      - name: Save warm cache (失败/超时也保存, 供下次续跑)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd source
+          if ls bin/targets/mediatek/filogic/*squashfs-sysupgrade.bin >/dev/null 2>&1; then
+            echo "已有固件产物, 跳过缓存上传"
+            exit 0
+          fi
+          PACK=""
+          for d in .ccache dl staging_dir; do
+            if [ -d "$d" ]; then PACK="$PACK $d"; fi
+          done
+          if [ -z "$PACK" ]; then echo "无可打包目录, 跳过"; exit 0; fi
+          echo "打包: $PACK"
+          du -sh $PACK || true
+          rm -f /tmp/warm.tar.zst /tmp/warm.part-* /tmp/prebuilt-cache.tar.zst.part-*
+          tar -I 'zstd -T0 -3' -cf /tmp/warm.tar.zst $PACK
+          ls -l --block-size=M /tmp/warm.tar.zst
+          split -b 1900M -d -a 3 /tmp/warm.tar.zst /tmp/warm.part-
+          i=0
+          for f in /tmp/warm.part-*; do
+            mv "$f" "/tmp/prebuilt-cache.tar.zst.part-$(printf '%03d' $i)"
+            i=$((i+1))
+          done
+          ls -l /tmp/prebuilt-cache.tar.zst.part-* | head
+          gh release view prebuilt-cache --repo ${{ github.repository }} >/dev/null 2>&1 \
+            || gh release create prebuilt-cache --repo ${{ github.repository }} \
+                 --title "Prebuilt build cache" --notes "Actions/Codespace 预热缓存(自动滚动更新)"
+          # 必须清掉旧分片: 否则新包分片数变少时, 旧的 part-002 会被 cat 进来导致解包损坏
+          gh release view prebuilt-cache --repo ${{ github.repository }} --json assets \
+            -q '.assets[].name' 2>/dev/null | grep -E '^prebuilt-cache\.tar\.zst\.part-' | \
+            while IFS= read -r n; do
+              gh release delete-asset prebuilt-cache "$n" --repo ${{ github.repository }} -y || true
+            done || true
+          gh release upload prebuilt-cache --repo ${{ github.repository }} \
+            /tmp/prebuilt-cache.tar.zst.part-* --clobber
+          rm -f /tmp/warm.tar.zst /tmp/prebuilt-cache.tar.zst.part-*
+          echo "热缓存已上传, 可用磁盘:"
+          df -BG --output=avail . | tail -1
 
       - name: Rename firmware (型号-版本命名)
         run: |
