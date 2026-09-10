@@ -45,7 +45,7 @@ jobs:
             ecj fastjar file g++ gawk gettext git \
             libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
             python3 python3-docutils python3-setuptools rsync swig time \
-            unzip wget zlib1g-dev qemu-utils
+            unzip wget zlib1g-dev qemu-utils zstd
           echo "runner arch: $(uname -m), nproc: $(nproc), mem: $(free -h | awk '/Mem/{print $2}')"
           ccache --version | head -1
 
@@ -92,6 +92,33 @@ jobs:
           restore-keys: |
             staging-${{ hashFiles('.config', 'feeds.conf.default') }}-
             staging-
+
+      # ---- 从 Release 资产恢复 Codespace 预热缓存(优先于 actions/cache, 解包后覆盖) ----
+      # 预热脚本: scripts/codespace-prepare-cache.sh (在 Codespace 里跑一次即可)
+      - name: Restore prebuilt caches (Codespace 预热资产)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd source
+          rm -rf /tmp/pc && mkdir -p /tmp/pc
+          gh release download prebuilt-cache --repo ${{ github.repository }} \
+            --pattern 'prebuilt-cache.tar.zst.part-*' --dir /tmp/pc --clobber 2>/dev/null || true
+          if ls /tmp/pc/prebuilt-cache.tar.zst.part-* >/dev/null 2>&1; then
+            echo "发现预热缓存资产, 解包到 source/ ..."
+            cat /tmp/pc/prebuilt-cache.tar.zst.part-* | zstd -d | tar -xf - -C source
+            echo "=== 恢复后大小 ==="
+            du -sh source/.ccache source/dl source/staging_dir 2>/dev/null || true
+            AVAIL=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+            echo "恢复后可用磁盘: ${AVAIL}GB"
+            if [ "${AVAIL:-0}" -lt 8 ]; then
+              echo "::warning::磁盘偏紧, 删除 dl 目录腾出空间(编译时会按需重新下载)"
+              rm -rf source/dl
+            fi
+            echo "PREBUILT_CACHE=yes" >> "$GITHUB_ENV"
+          else
+            echo "没有预热缓存资产(prebuilt-cache Release), 本次按冷构建执行"
+            echo "PREBUILT_CACHE=no" >> "$GITHUB_ENV"
+          fi
 
       - name: Update feeds & apply fixes
         run: |
