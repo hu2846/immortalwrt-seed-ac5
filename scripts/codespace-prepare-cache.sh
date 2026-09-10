@@ -68,6 +68,24 @@ cd source
 
 log "应用本仓库的 feeds / .config / files / 补丁脚本"
 CONFIG_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 关键: Codespace 里的仓库克隆可能停留在旧提交(历史事故: 用它编译只收敛出 235 个包,
+# 且 bin/targets 里没有 beeconmini_seed-ac5 设备镜像)。先从 origin/master 刷新这两个配置文件。
+if [ -d "$CONFIG_REPO_DIR/.git" ]; then
+  if git -C "$CONFIG_REPO_DIR" fetch -q origin master; then
+    for f in .config feeds.conf.default; do
+      if git -C "$CONFIG_REPO_DIR" show FETCH_HEAD:"$f" > "$CONFIG_REPO_DIR/$f.tmp" 2>/dev/null \
+         && [ -s "$CONFIG_REPO_DIR/$f.tmp" ]; then
+        mv -f "$CONFIG_REPO_DIR/$f.tmp" "$CONFIG_REPO_DIR/$f"
+        echo "已从 origin/master 刷新 $f"
+      else
+        rm -f "$CONFIG_REPO_DIR/$f.tmp"
+        echo "⚠️ $f 刷新失败, 沿用现有副本"
+      fi
+    done
+  else
+    echo "⚠️ git fetch 失败, 沿用现有副本(可能较旧)"
+  fi
+fi
 cp -f "$CONFIG_REPO_DIR/feeds.conf.default" feeds.conf.default
 cp -f "$CONFIG_REPO_DIR/.config" .config
 [ -d "$CONFIG_REPO_DIR/files" ] && cp -r "$CONFIG_REPO_DIR/files" ./
@@ -138,10 +156,8 @@ PACK_LIST=(.ccache dl staging_dir)
 if [ "$KEEP_BUILD_DIR" = "1" ] && [ -d build_dir ]; then
   PACK_LIST+=(build_dir)
 else
-  # 只保留体积小、对增量有用的 host 构建目录(若不太大)
-  for d in build_dir/host build_dir/hostpkg; do
-    if [ -d "$d" ] && [ "$(du -sBG "$d" | tr -dc '0-9')" -lt 4 ]; then PACK_LIST+=("$d"); fi
-  done
+  # ⚠️ 必须先删再打包: 旧版先把 build_dir/host* 加进 PACK_LIST 又 `rm -rf build_dir`,
+  # 导致 tar 报 "Exiting with failure status due to previous errors"(文件不存在)。
   rm -rf build_dir
 fi
 echo "打包内容: ${PACK_LIST[*]}"; du -sh "${PACK_LIST[@]}" 2>/dev/null || true
@@ -154,7 +170,19 @@ log "分片并上传到 Release: $CACHE_RELEASE"
 rm -f "${TARBALL}".part-*
 split -b "$PART_SIZE" -d -a 3 "$TARBALL" "${TARBALL}.part-"
 export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-if [ -z "${GH_TOKEN:-}" ]; then echo "❌ 未找到 GH_TOKEN/GITHUB_TOKEN"; exit 1; fi
+# gh cs ssh 不会继承本机环境变量, 因此也尝试从常见文件位置读取 token
+if [ -z "${GH_TOKEN:-}" ]; then
+  for f in "$HOME/.gh_token" "$HOME/.ghtoken" "$CONFIG_REPO_DIR/.gh_token"; do
+    if [ -s "$f" ]; then export GH_TOKEN="$(tr -d '\r\n' < "$f")"; echo "已从 $f 读取 token"; break; fi
+  done
+fi
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "❌ 未找到 GH_TOKEN/GITHUB_TOKEN。"
+  echo "   注意: 通过 'gh cs ssh -c <name> -- \"bash scripts/codespace-prepare-cache.sh\"' 调用时不会继承本机 env,"
+  echo "   请显式传入: gh cs ssh -c <name> -- \"GH_TOKEN=<tok> bash scripts/codespace-prepare-cache.sh\""
+  echo "   或将 token 写入 ~/.gh_token 后重跑(打包好的 $TARBALL 仍在, 可 SKIP_BUILD=1 直接重跑打包上传)。"
+  exit 1
+fi
 if ! gh release view "$CACHE_RELEASE" --repo "$REPO_SLUG" >/dev/null 2>&1; then
   gh release create "$CACHE_RELEASE" --repo "$REPO_SLUG" \
     --title "Prebuilt build cache" --notes "Codespace 预热的 ccache/dl/staging 缓存, 供 Actions 工作流恢复使用。" || true
