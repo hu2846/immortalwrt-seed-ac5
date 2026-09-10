@@ -80,8 +80,13 @@ jobs:
           # 应用编译配置
           cp $GITHUB_WORKSPACE/.config .config
           # Go 引导: 关闭 arm64 不可用的 go1.4 bootstrap 构建, 指向 runner 上的官方 Go
-          sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=y|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
-          if grep -q '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
+          # (注: defconfig 会复原该符号, 收敛循环之后还会再强制修正一次, 见下方)
+          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=' .config; then
+            sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=.*|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
+          else
+            echo '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set' >> .config
+          fi
+          if grep -qE '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
             sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
           else
             echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
@@ -114,6 +119,19 @@ jobs:
             if [ "$N" -eq "$PREV" ]; then echo "配置已收敛"; break; fi
             PREV=$N
           done
+          # defconfig 会把 GOLANG_BUILD_BOOTSTRAP 复原为 y(该符号 default y 且被 golang 包 select),
+          # 必须在收敛之后再修正一次(run 34426965293 失败根因: 修正在 defconfig 之前被冲掉)
+          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=' .config; then
+            sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=.*|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
+          else
+            echo '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set' >> .config
+          fi
+          if grep -qE '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
+            sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
+          else
+            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
+          fi
+          grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
 
       - name: Validate config (防配置丢失回归)
         run: |
@@ -163,8 +181,16 @@ jobs:
         run: |
           cd source
           # 最终强制: 防止 defconfig 循环把 GOLANG_BUILD_BOOTSTRAP 复原为 y
-          sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=y|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
-          sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
+          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=' .config; then
+            sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=.*|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
+          else
+            echo '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set' >> .config
+          fi
+          if grep -qE '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
+            sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
+          else
+            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
+          fi
           grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
           make -j$(nproc) V=s
         timeout-minutes: 330
