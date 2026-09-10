@@ -105,14 +105,22 @@ jobs:
             --pattern 'prebuilt-cache.tar.zst.part-*' --dir /tmp/pc --clobber 2>/dev/null || true
           if ls /tmp/pc/prebuilt-cache.tar.zst.part-* >/dev/null 2>&1; then
             echo "发现预热缓存资产, 解包到 source/ ..."
-            cat /tmp/pc/prebuilt-cache.tar.zst.part-* | zstd -d | tar -xf - -C source
+            # 已在 source/ 内(cd source), 因此这里必须解到当前目录 "."
+            # 历史 bug: 写成 `-C source` → 相当于 source/source 不存在 → tar 报错 exit 2
+            cat /tmp/pc/prebuilt-cache.tar.zst.part-* | zstd -d | tar -xf - -C .
             echo "=== 恢复后大小 ==="
-            du -sh source/.ccache source/dl source/staging_dir 2>/dev/null || true
+            du -sh .ccache dl staging_dir 2>/dev/null || true
+            ls -d build_dir 2>/dev/null && du -sh build_dir || true
             AVAIL=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
             echo "恢复后可用磁盘: ${AVAIL}GB"
             if [ "${AVAIL:-0}" -lt 8 ]; then
               echo "::warning::磁盘偏紧, 删除 dl 目录腾出空间(编译时会按需重新下载)"
-              rm -rf source/dl
+              rm -rf dl
+            fi
+            # 缓存有效性校验: ccache 或 staging_dir 至少有一个非空, 否则视为无效缓存(避免白跑 6 小时冷构建)
+            if [ ! -d .ccache ] && [ ! -d staging_dir ]; then
+              echo "::error::预热缓存解包后 .ccache 与 staging_dir 均不存在, 缓存无效"
+              exit 1
             fi
             echo "PREBUILT_CACHE=yes" >> "$GITHUB_ENV"
           else
