@@ -48,6 +48,29 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
           df -h /
 
+      # ARM64(linux/arm64) 宿主无法构建 go1.4 bootstrap(上游 golang-bootstrap 的
+      # BOOTSTRAP_GO_VALID_OS_ARCH 不含 linux/arm64, run 34416060441 失败根因),
+      # 改为在 runner 上装官方 Go, 作为 host Go 的外部引导工具链。
+      - name: Install host Go bootstrap
+        run: |
+          ARCH=$(uname -m); case "$ARCH" in x86_64) A=amd64;; aarch64|arm64) A=arm64;; *) A=$ARCH;; esac
+          VERS=$(python3 -c "import json,urllib.request;print(' '.join(v['version'][2:] for v in json.load(urllib.request.urlopen('https://go.dev/dl/?mode=json',timeout=30))[:4]))" 2>/dev/null || true)
+          VERS="$VERS 1.27.0 1.26.5 1.26.0 1.25.0"
+          ok=0
+          for V in $(echo $VERS | tr ' ' '\n' | awk 'NF && !seen[$0]++'); do
+            for BASE in https://go.dev/dl https://golang.google.cn/dl https://mirrors.ustc.edu.cn/golang; do
+              if curl -fsSL --retry 2 --connect-timeout 20 "$BASE/go${V}.linux-${A}.tar.gz" -o /tmp/goboot.tgz; then
+                echo "引导 Go: $V (linux-${A}) from $BASE"; ok=1; break 2
+              fi
+            done
+          done
+          [ "$ok" = "1" ] || { echo "::error::无法下载引导 Go 工具链"; exit 1; }
+          sudo rm -rf /usr/local/go-bootstrap && sudo mkdir -p /usr/local/go-bootstrap
+          sudo tar -C /usr/local/go-bootstrap --strip-components=1 -xzf /tmp/goboot.tgz
+          sudo chown -R "$(id -u):$(id -g)" /usr/local/go-bootstrap
+          /usr/local/go-bootstrap/bin/go version
+          echo "GO_BOOTSTRAP_ROOT=/usr/local/go-bootstrap" >> "$GITHUB_ENV"
+
       - name: Clone source
         run: |
           git clone -b $REPO_BRANCH --single-branch $REPO_URL source
@@ -56,6 +79,14 @@ jobs:
           cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
           # 应用编译配置
           cp $GITHUB_WORKSPACE/.config .config
+          # Go 引导: 关闭 arm64 不可用的 go1.4 bootstrap 构建, 指向 runner 上的官方 Go
+          sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=y|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
+          if grep -q '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
+            sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
+          else
+            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
+          fi
+          grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
           # 复制自定义文件(IP 配置等)
           [ -d $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./
           # 更新 feeds
@@ -104,17 +135,37 @@ jobs:
               exit 1
             fi
           done
+          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=y' .config; then
+            echo "::error::GOLANG_BUILD_BOOTSTRAP 仍为 y, arm64 宿主无法构建 go1.4 bootstrap"
+            exit 1
+          fi
+          grep -q '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT="/usr/local/go-bootstrap"' .config \
+            || echo "::warning::GOLANG_EXTERNAL_BOOTSTRAP_ROOT 未指向引导 Go, 构建步骤将再次强制覆盖"
           echo "关键包全部保留 ✓"
 
       - name: Download source packages
         run: |
           cd source
-          make -j$(nproc) download
-        timeout-minutes: 30
+          for i in 1 2 3; do
+            echo "--- make download 第 $i 次 ---"
+            if make -j$(nproc) download; then
+              echo "源码包全部下载成功"
+              break
+            fi
+            echo "download 存在失败项, 30秒后重试..."
+            sleep 30
+          done
+          # 最终确认: 仍有失败则让其自然报错终止(不继续编译)
+          make download 2>&1 | grep -iE "failed|error" && exit 1 || true
+        timeout-minutes: 60
 
       - name: Build firmware
         run: |
           cd source
+          # 最终强制: 防止 defconfig 循环把 GOLANG_BUILD_BOOTSTRAP 复原为 y
+          sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=y|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
+          sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
+          grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
           make -j$(nproc) V=s
         timeout-minutes: 330
 
