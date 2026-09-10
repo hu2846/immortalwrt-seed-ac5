@@ -10,6 +10,10 @@
 #   bash scripts/codespace-prepare-cache.sh
 #
 # 常用环境变量:
+#   WORK=/tmp/build        源码/编译工作目录(默认 /workspaces/build)。
+#                          ★ Codespace 里 /workspaces 通常只有 32GB, 而 /tmp 往往挂在大盘上
+#                            (本机实测 118GB), 全量编译峰值 60GB+, 建议 WORK=/tmp/build
+#   TARBALL=...            打包产物路径(默认与 WORK 同分区)
 #   GOAL=toolchain|full    toolchain=只编工具链(约40~60min, 适合 32GB 小盘先跑一轮); full=全量(默认)
 #   TRIGGER_BUILD=1        打包上传完成后自动触发 Actions 热构建
 #   SKIP_BUILD=1           不编译, 只打包现有缓存
@@ -34,15 +38,22 @@ GOAL="${GOAL:-full}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 DISK_FLOOR_GB="${DISK_FLOOR_GB:-3}"
 KEEP_BUILD_DIR="${KEEP_BUILD_DIR:-0}"
-TARBALL="${TARBALL:-/workspaces/prebuilt-cache.tar.zst}"
+TARBALL="${TARBALL:-$(dirname "$WORK")/prebuilt-cache.tar.zst}"
 PART_SIZE="${PART_SIZE:-1900M}"
 
 log() { echo -e "\n\033[1;36m==> $*\033[0m"; }
-avail_gb() { df -BG --output=avail /workspaces | tail -1 | tr -dc '0-9'; }
+# 可用磁盘(GB): 跟随 WORK 所在分区(不存在时向上找已存在的父目录)
+avail_gb() {
+  local p="${1:-$WORK}"
+  while [ ! -d "$p" ] && [ "$p" != "/" ]; do p="$(dirname "$p")"; done
+  df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc '0-9'
+}
 
 log "环境检查"
-echo "nproc=$(nproc) arch=$(uname -m) 目标=$GOAL"; free -h | head -2; df -h /workspaces | tail -1
-echo "可用磁盘: $(avail_gb)GB (看门狗阈值 ${DISK_FLOOR_GB}GB)"
+echo "nproc=$(nproc) arch=$(uname -m) 目标=$GOAL"; free -h | head -2
+echo "工作目录: $WORK (所在分区可用 $(avail_gb)GB)"
+df -h /workspaces /tmp 2>/dev/null | grep -vE '^Filesystem' | head -4
+echo "看门狗阈值 ${DISK_FLOOR_GB}GB"
 
 log "安装编译依赖"
 sudo apt-get update -qq
