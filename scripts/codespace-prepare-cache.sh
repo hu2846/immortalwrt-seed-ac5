@@ -125,3 +125,10 @@ gh release upload "$CACHE_RELEASE" "${TARBALL}".part-* --repo "$REPO_SLUG" --clo
 
 log "完成 ✅ 缓存已上传为 Release '$CACHE_RELEASE' 的资产"
 echo "下一步: 在 Actions 里手动触发一次 'Build ImmortalWRT for SEED AC5' 即可"
+
+if [ "${TRIGGER_BUILD:-0}" = "1" ]; then
+  log "自动触发 Actions 构建(热构建)"
+  gh workflow run "Build ImmortalWRT for SEED AC5" --repo "$REPO_SLUG" --ref master
+  sleep 8
+  gh run list --repo "$REPO_SLUG" --workflow "Build ImmortalWRT for SEED AC5" --limit 3
+fi
