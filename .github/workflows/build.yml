@@ -103,6 +103,10 @@ jobs:
           # 注意: 不可做成 feeds/.../libffi/patches/*.patch —— 那会被打进 libffi 源码树
           # (run 34358095685 教训: 畸形补丁致 host prepare 的 patch 失败, 全盘编译中止)
           python3 $GITHUB_WORKSPACE/scripts/fix-libffi-makefile.py feeds/packages/libs/libffi/Makefile
+          # 修复 lang/node feed: 上游 NODEJS_BIN 硬编码 linux-x64, 在 arm64 runner 上会解包出
+          # 无法执行的 x86-64 node, 导致 host 侧 npm 全废(node: 1: Syntax error) ->
+          # 依赖 npm 的包(smartdns-ui 的 webui)编译失败(失败 run 34431019225/34433074508 根因)。
+          python3 $GITHUB_WORKSPACE/scripts/fix-host-node-arch.py feeds/packages/lang/node/node/Makefile
           # 配置收敛: 历史 .config 单次 defconfig 会静默丢弃大部分已选包(固件缩水到28MB),
           # 反复"从原始 .config 补回缺失的 =y 并 defconfig"直至稳定, 得到规范化配置。
           PREV=-1
@@ -159,6 +163,14 @@ jobs:
           fi
           grep -q '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT="/usr/local/go-bootstrap"' .config \
             || echo "::warning::GOLANG_EXTERNAL_BOOTSTRAP_ROOT 未指向引导 Go, 构建步骤将再次强制覆盖"
+          # arm64 宿主必须把 host node 二进制换成 linux-arm64(否则 npm 不可用, smartdns-ui 必失败)
+          if [ "$(uname -m)" = "aarch64" ]; then
+            if ! grep -q 'NODEJS_BIN:=node-v$(PKG_VERSION)-linux-arm64.tar.gz' feeds/packages/lang/node/node/Makefile; then
+              echo "::error::host node 仍指向 linux-x64, arm64 runner 上 npm 会失效"
+              exit 1
+            fi
+            echo "host node 架构修复 ✓ (linux-arm64)"
+          fi
           echo "关键包全部保留 ✓"
 
       - name: Download source packages
@@ -193,7 +205,9 @@ jobs:
           fi
           grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
           make -j$(nproc) V=s
-        timeout-minutes: 330
+        # 任务上限 360min; 前面 setup/clone/download 约占 9~10min, 故步骤给到 350 留足余量
+        # (run 34431019225: 到 package/compile 结束已用 301min, 图像打包还需时间, 原 330 偏紧)
+        timeout-minutes: 350
 
       - name: Rename firmware (型号-版本命名)
         run: |
