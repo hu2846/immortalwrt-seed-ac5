@@ -21,12 +21,17 @@ env:
   REPO_BRANCH: 25.12.0-rc2
   TARGET: mediatek/filogic
   DEVICE: beeconmini_seed-ac5
+  # ccache(编译缓存): 显著缩短二次编译时间(官方 CI 与社区模板均采用)
+  CCACHE_DIR: ${{ github.workspace }}/source/.ccache
+  CCACHE_MAXSIZE: 2G
+  CCACHE_COMPRESS: "true"
+  CCACHE_COMPILERCHECK: content
 
 jobs:
   build:
-    # 2026-09-10: x86(2核)冷构建约需6.5h > 300min步骤/360min任务上限(曾两次超时),
-    # 换 ARM 4核 runner(免费, 公共仓库可用)提速约一倍; ubuntu-24.04 无 libncurses5-dev
-    runs-on: ubuntu-24.04-arm
+    # 2026-09-10: 回到 x86(ubuntu-22.04) 平台, 通过"多层缓存(dl/ccache/staging)+启用 CONFIG_CCACHE
+    # +移除触发 Rust 工具链的孤儿包"解决原先冷构建超时问题, 不再使用 ARM runner。
+    runs-on: ubuntu-22.04
     timeout-minutes: 360
 
     steps:
@@ -38,75 +43,71 @@ jobs:
           sudo apt update -qq
           sudo apt install -y -qq build-essential ccache clang cmake curl \
             ecj fastjar file g++ gawk gettext git \
-            libelf-dev libncurses-dev libssl-dev \
+            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
             python3 python3-docutils python3-setuptools rsync swig time \
             unzip wget zlib1g-dev qemu-utils
           echo "runner arch: $(uname -m), nproc: $(nproc), mem: $(free -h | awk '/Mem/{print $2}')"
+          ccache --version | head -1
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache
           df -h /
-
-      # ARM64(linux/arm64) 宿主无法构建 go1.4 bootstrap(上游 golang-bootstrap 的
-      # BOOTSTRAP_GO_VALID_OS_ARCH 不含 linux/arm64, run 34416060441 失败根因),
-      # 改为在 runner 上装官方 Go, 作为 host Go 的外部引导工具链。
-      - name: Install host Go bootstrap
-        run: |
-          ARCH=$(uname -m); case "$ARCH" in x86_64) A=amd64;; aarch64|arm64) A=arm64;; *) A=$ARCH;; esac
-          VERS=$(python3 -c "import json,urllib.request;print(' '.join(v['version'][2:] for v in json.load(urllib.request.urlopen('https://go.dev/dl/?mode=json',timeout=30))[:4]))" 2>/dev/null || true)
-          VERS="$VERS 1.27.0 1.26.5 1.26.0 1.25.0"
-          ok=0
-          for V in $(echo $VERS | tr ' ' '\n' | awk 'NF && !seen[$0]++'); do
-            for BASE in https://go.dev/dl https://golang.google.cn/dl https://mirrors.ustc.edu.cn/golang; do
-              if curl -fsSL --retry 2 --connect-timeout 20 "$BASE/go${V}.linux-${A}.tar.gz" -o /tmp/goboot.tgz; then
-                echo "引导 Go: $V (linux-${A}) from $BASE"; ok=1; break 2
-              fi
-            done
-          done
-          [ "$ok" = "1" ] || { echo "::error::无法下载引导 Go 工具链"; exit 1; }
-          sudo rm -rf /usr/local/go-bootstrap && sudo mkdir -p /usr/local/go-bootstrap
-          sudo tar -C /usr/local/go-bootstrap --strip-components=1 -xzf /tmp/goboot.tgz
-          sudo chown -R "$(id -u):$(id -g)" /usr/local/go-bootstrap
-          /usr/local/go-bootstrap/bin/go version
-          echo "GO_BOOTSTRAP_ROOT=/usr/local/go-bootstrap" >> "$GITHUB_ENV"
 
       - name: Clone source
         run: |
           git clone -b $REPO_BRANCH --single-branch $REPO_URL source
           cd source
-          # 应用自定义 feeds 配置
           cp $GITHUB_WORKSPACE/feeds.conf.default feeds.conf.default
-          # 应用编译配置
           cp $GITHUB_WORKSPACE/.config .config
-          # Go 引导: 关闭 arm64 不可用的 go1.4 bootstrap 构建, 指向 runner 上的官方 Go
-          # (注: defconfig 会复原该符号, 收敛循环之后还会再强制修正一次, 见下方)
-          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=' .config; then
-            sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=.*|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
-          else
-            echo '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set' >> .config
-          fi
-          if grep -qE '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
-            sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
-          else
-            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
-          fi
-          grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
-          # 复制自定义文件(IP 配置等)
           [ -d $GITHUB_WORKSPACE/files ] && cp -r $GITHUB_WORKSPACE/files ./
-          # 更新 feeds
+          mkdir -p .ccache
+          echo "=== 下载目录/缓存 ==="
+          df -h .
+
+      # ---- 多层缓存(社区验证做法: linkease/openwrt-app-actions、OpenWrt Fastbuild、openwrt 官方 CI) ----
+      - name: Restore dl cache
+        uses: actions/cache@v4
+        with:
+          path: source/dl
+          key: dl-${{ hashFiles('feeds.conf.default') }}-${{ github.run_number }}
+          restore-keys: |
+            dl-${{ hashFiles('feeds.conf.default') }}-
+            dl-
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: source/.ccache
+          key: ccache-${{ hashFiles('.config', 'feeds.conf.default') }}-${{ github.run_number }}
+          restore-keys: |
+            ccache-${{ hashFiles('.config', 'feeds.conf.default') }}-
+            ccache-
+
+      - name: Restore staging_dir
+        uses: actions/cache@v4
+        with:
+          path: source/staging_dir
+          key: staging-${{ hashFiles('.config', 'feeds.conf.default') }}-${{ github.run_number }}
+          restore-keys: |
+            staging-${{ hashFiles('.config', 'feeds.conf.default') }}-
+            staging-
+
+      - name: Update feeds & apply fixes
+        run: |
+          cd source
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           # 修复 libffi feed: 上游 InstallDev 复制 fficonfig.h 的 $(GNU_TARGET_NAME)* glob
-          # 在 3.4.7 布局下匹配不到(历史两次编译失败均因此)。直接改 feed 的 Makefile,
-          # 用 find 兜底定位 fficonfig.h。
-          # 注意: 不可做成 feeds/.../libffi/patches/*.patch —— 那会被打进 libffi 源码树
-          # (run 34358095685 教训: 畸形补丁致 host prepare 的 patch 失败, 全盘编译中止)
+          # 在 3.4.7 布局下匹配不到(历史编译失败原因之一)。直接改 feed 的 Makefile, 用 find 兜底。
+          # 注意: 不可做成 feeds/.../libffi/patches/*.patch(会把补丁打进 libffi 源码树导致失败)
           python3 $GITHUB_WORKSPACE/scripts/fix-libffi-makefile.py feeds/packages/libs/libffi/Makefile
-          # 修复 lang/node feed: 上游 NODEJS_BIN 硬编码 linux-x64, 在 arm64 runner 上会解包出
-          # 无法执行的 x86-64 node, 导致 host 侧 npm 全废(node: 1: Syntax error) ->
-          # 依赖 npm 的包(smartdns-ui 的 webui)编译失败(失败 run 34431019225/34433074508 根因)。
-          python3 $GITHUB_WORKSPACE/scripts/fix-host-node-arch.py feeds/packages/lang/node/node/Makefile
+          # 启用 ccache
+          if grep -qE '^CONFIG_CCACHE=' .config; then
+            sed -i 's|^CONFIG_CCACHE=.*|CONFIG_CCACHE=y|' .config
+          else
+            echo 'CONFIG_CCACHE=y' >> .config
+          fi
           # 配置收敛: 历史 .config 单次 defconfig 会静默丢弃大部分已选包(固件缩水到28MB),
           # 反复"从原始 .config 补回缺失的 =y 并 defconfig"直至稳定, 得到规范化配置。
           PREV=-1
@@ -123,19 +124,9 @@ jobs:
             if [ "$N" -eq "$PREV" ]; then echo "配置已收敛"; break; fi
             PREV=$N
           done
-          # defconfig 会把 GOLANG_BUILD_BOOTSTRAP 复原为 y(该符号 default y 且被 golang 包 select),
-          # 必须在收敛之后再修正一次(run 34426965293 失败根因: 修正在 defconfig 之前被冲掉)
-          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=' .config; then
-            sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=.*|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
-          else
-            echo '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set' >> .config
-          fi
-          if grep -qE '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
-            sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
-          else
-            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
-          fi
-          grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
+          # defconfig 后再次确保 ccache 开启(防止被冲掉)
+          grep -qE '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
+          grep -E '^CONFIG_CCACHE=' .config
 
       - name: Validate config (防配置丢失回归)
         run: |
@@ -157,20 +148,13 @@ jobs:
               exit 1
             fi
           done
-          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=y' .config; then
-            echo "::error::GOLANG_BUILD_BOOTSTRAP 仍为 y, arm64 宿主无法构建 go1.4 bootstrap"
-            exit 1
-          fi
-          grep -q '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT="/usr/local/go-bootstrap"' .config \
-            || echo "::warning::GOLANG_EXTERNAL_BOOTSTRAP_ROOT 未指向引导 Go, 构建步骤将再次强制覆盖"
-          # arm64 宿主必须把 host node 二进制换成 linux-arm64(否则 npm 不可用, smartdns-ui 必失败)
-          if [ "$(uname -m)" = "aarch64" ]; then
-            if ! grep -q 'NODEJS_BIN:=node-v$(PKG_VERSION)-linux-arm64.tar.gz' feeds/packages/lang/node/node/Makefile; then
-              echo "::error::host node 仍指向 linux-x64, arm64 runner 上 npm 会失效"
+          # 防回归: 确认会触发 Rust 工具链的孤儿包确实已关闭
+          for p in shadowsocks-rust-sslocal shadowsocks-rust-ssserver shadow-tls dns2socks-rust; do
+            if grep -qE "^CONFIG_PACKAGE_$p=y" .config; then
+              echo "::error::$p 仍被选中, 会编译 Rust 工具链(1.5~2h)导致超时"
               exit 1
             fi
-            echo "host node 架构修复 ✓ (linux-arm64)"
-          fi
+          done
           echo "关键包全部保留 ✓"
 
       - name: Download source packages
@@ -178,36 +162,23 @@ jobs:
           cd source
           for i in 1 2 3; do
             echo "--- make download 第 $i 次 ---"
-            if make -j$(nproc) download; then
+            if make -j$(($(nproc)+1)) download; then
               echo "源码包全部下载成功"
               break
             fi
             echo "download 存在失败项, 30秒后重试..."
             sleep 30
           done
-          # 最终确认: 仍有失败则让其自然报错终止(不继续编译)
           make download 2>&1 | grep -iE "failed|error" && exit 1 || true
         timeout-minutes: 60
 
       - name: Build firmware
         run: |
           cd source
-          # 最终强制: 防止 defconfig 循环把 GOLANG_BUILD_BOOTSTRAP 复原为 y
-          if grep -qE '^CONFIG_GOLANG_BUILD_BOOTSTRAP=' .config; then
-            sed -i 's|^CONFIG_GOLANG_BUILD_BOOTSTRAP=.*|# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set|' .config
-          else
-            echo '# CONFIG_GOLANG_BUILD_BOOTSTRAP is not set' >> .config
-          fi
-          if grep -qE '^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=' .config; then
-            sed -i "s|^CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=.*|CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"|" .config
-          else
-            echo "CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT=\"$GO_BOOTSTRAP_ROOT\"" >> .config
-          fi
-          grep -E 'GOLANG_(BUILD_BOOTSTRAP|EXTERNAL)' .config
           make -j$(nproc) V=s
-        # 任务上限 360min; 前面 setup/clone/download 约占 9~10min, 故步骤给到 350 留足余量
-        # (run 34431019225: 到 package/compile 结束已用 301min, 图像打包还需时间, 原 330 偏紧)
-        timeout-minutes: 350
+          echo "=== ccache 统计 ==="
+          ccache -s || true
+        timeout-minutes: 345
 
       - name: Rename firmware (型号-版本命名)
         run: |
