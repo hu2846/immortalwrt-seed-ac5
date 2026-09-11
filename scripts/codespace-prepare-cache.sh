@@ -49,6 +49,20 @@ avail_gb() {
   df -BG --output=avail "$p" 2>/dev/null | tail -1 | tr -dc '0-9'
 }
 
+# ★★ 必须在任何 cd 之前解析“配置仓库”根目录 ★★
+# 用相对路径调用脚本时 BASH_SOURCE 是相对路径, 之后一旦 cd 走开, 解析结果就会变成
+# 编译目录自身 —— 2026-09-11 实际踩坑: cp 报 "are the same file", 你的 .config 根本没
+# 拷进源码树, defconfig 回落到 target 默认设备(openwrt_one), 出现"编译成功但产物不是
+# 目标机"的假成功。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ ! -f "$CONFIG_REPO_DIR/.config" ]; then
+  echo "❌ 无法定位配置仓库: $CONFIG_REPO_DIR 下没有 .config"
+  echo "   请用绝对路径调用: bash $(pwd)/scripts/codespace-prepare-cache.sh"
+  exit 1
+fi
+echo "配置仓库: $CONFIG_REPO_DIR"
+
 log "环境检查"
 echo "nproc=$(nproc) arch=$(uname -m) 目标=$GOAL"; free -h | head -2
 echo "工作目录: $WORK (所在分区可用 $(avail_gb)GB)"
@@ -67,7 +81,7 @@ mkdir -p "$WORK"; cd "$WORK"
 cd source
 
 log "应用本仓库的 feeds / .config / files / 补丁脚本"
-CONFIG_REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# CONFIG_REPO_DIR 已在脚本开头(任何 cd 之前)解析完成, 此处不再重算。
 # 关键: Codespace 里的仓库克隆可能停留在旧提交(历史事故: 用它编译只收敛出 235 个包,
 # 且 bin/targets 里没有 beeconmini_seed-ac5 设备镜像)。先从 origin/master 刷新这两个配置文件。
 if [ -d "$CONFIG_REPO_DIR/.git" ]; then
@@ -88,6 +102,13 @@ if [ -d "$CONFIG_REPO_DIR/.git" ]; then
 fi
 cp -f "$CONFIG_REPO_DIR/feeds.conf.default" feeds.conf.default
 cp -f "$CONFIG_REPO_DIR/.config" .config
+# 硬校验: .config 必须真的拷进来了(源里要含目标设备)
+if ! grep -q "beeconmini_seed-ac5" .config; then
+  echo "❌ .config 未正确应用(未找到 beeconmini_seed-ac5)! 来源: $CONFIG_REPO_DIR/.config"
+  echo "   若来源与目标相同会报 'are the same file', 说明 SCRIPT_DIR 解析有误。"
+  exit 1
+fi
+echo "✅ 已应用 .config: $(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config) 个包"
 [ -d "$CONFIG_REPO_DIR/files" ] && cp -r "$CONFIG_REPO_DIR/files" ./
 mkdir -p .ccache
 export CCACHE_DIR="$WORK/source/.ccache" CCACHE_MAXSIZE=8G CCACHE_COMPRESS=true
