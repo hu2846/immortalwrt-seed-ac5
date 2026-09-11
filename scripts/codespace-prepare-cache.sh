@@ -135,10 +135,13 @@ python3 "$CONFIG_REPO_DIR/scripts/fix-libffi-makefile.py" feeds/packages/libs/li
 # 因此把下限对齐到树内版本是安全且等效的。
 # 注意: 不要用改 .config / feeds.conf.default 的方式绕(会触发 Actions 构建且破坏已验证的收敛逻辑)。
 if [ -f feeds/luci/luci.mk ]; then
-  sed -i -E -e 's/^LUCI_UT_MIN_UCODE\?=.*/LUCI_UT_MIN_UCODE?=0.0.0/' \
-            -e 's/ucode \(>=[^)]*\)/ucode/g' feeds/luci/luci.mk
-  echo "✅ 已修正 feeds/luci/luci.mk 的 ucode 依赖下限:"
-  grep -nE 'LUCI_UT_MIN_UCODE|ucode \(>=' feeds/luci/luci.mk | head -5
+  # 只把"版本下限"下调为 0.0.0 —— 树内 ucode(2026.01.16)必然满足该下限。
+  # ⚠️ 千万不要试图把 `ucode (>=$(LUCI_UT_MIN_UCODE))` 整段文本 sed 删掉:
+  #    该行末尾是连续三个 ')' (字面括号 + 变量括号 + $(strip 的括号),
+  #    用 [^)]* 匹配会把字面 '(' 的闭合括号吃掉, 得到 `ucode))` 这种畸形依赖。
+  sed -i -E 's/^LUCI_UT_MIN_UCODE\?=.*/LUCI_UT_MIN_UCODE?=0.0.0/' feeds/luci/luci.mk
+  echo "✅ 已下调 feeds/luci/luci.mk 的 ucode 版本下限:"
+  grep -nE '^LUCI_UT_MIN_UCODE\?=|ucode \(>=' feeds/luci/luci.mk | head -5
 else
   echo "⚠️ feeds/luci/luci.mk 不存在, 跳过 ucode 依赖下限修正"
 fi
