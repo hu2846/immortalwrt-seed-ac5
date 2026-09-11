@@ -19,7 +19,9 @@
 #   SKIP_BUILD=1           不编译, 只打包现有缓存
 #   JOBS=4                 并行度(默认 nproc)
 #   DISK_FLOOR_GB=3        磁盘看门狗阈值: 可用空间低于该值自动停下编译, 保证还能打包上传
-#   KEEP_BUILD_DIR=1       打包时保留 build_dir(默认删除以腾出空间)
+#   KEEP_BUILD_DIR=1       打包时**一并把 build_dir 打进 tar**(体积巨大, 一般不用)
+#   KEEP_BUILD_DIR_ON_DISK=1  只保留 build_dir 在磁盘上、但不打包(Codespace 专用;
+#                             失败后可直接续跑, 不必从零重编)
 #   CACHE_RELEASE=prebuilt-cache   缓存所在 Release tag
 #
 # 32GB 磁盘建议(两轮累积):
@@ -117,6 +119,29 @@ export CCACHE_DIR="$WORK/source/.ccache" CCACHE_MAXSIZE=8G CCACHE_COMPRESS=true
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 python3 "$CONFIG_REPO_DIR/scripts/fix-libffi-makefile.py" feeds/packages/libs/libffi/Makefile || true
+
+# ---- 修正 feeds/luci 的 ucode 版本下限(2026-09-11 实际踩坑) ----
+# feeds/luci/luci.mk 新增了 "ucode 字节码格式下限":
+#   LUCI_UT_MIN_UCODE?=2026.02.27    # ucode 字节码 format 0x02 自 2026-02-27 起
+# 并在 LUCI_EXTRA_DEPENDS 里生成 `ucode (>=$(LUCI_UT_MIN_UCODE))` 依赖。
+# 但本源码树(BeeconMini/immortalwrt@25.12.0-rc2)内 ucode 仍是 2026.01.16, apk 依赖解析直接失败:
+#   ERROR: unable to select packages:
+#     ucode-2026.01.16~85922056-r1:
+#       breaks: luci-base-[ucode>=2026.02.27] / luci-mod-status / luci-theme-argon / luci-theme-bootstrap / wpad-openssl
+#   make[2]: *** [package/Makefile:100: package/install] Error 71
+#   make: *** [include/toplevel.mk:233: world] Error 2   -> 全部包都编完了, 却卡在最后装 rootfs, 不产出固件
+# 该下限的原意是"host 端 ucode 预编译模板产出的字节码必须能被目标端运行时读取";
+# 本树里 ucode/host 与目标 ucode 同源同版本(package/utils/ucode/Makefile), 格式天然一致,
+# 因此把下限对齐到树内版本是安全且等效的。
+# 注意: 不要用改 .config / feeds.conf.default 的方式绕(会触发 Actions 构建且破坏已验证的收敛逻辑)。
+if [ -f feeds/luci/luci.mk ]; then
+  sed -i -E -e 's/^LUCI_UT_MIN_UCODE\?=.*/LUCI_UT_MIN_UCODE?=0.0.0/' \
+            -e 's/ucode \(>=[^)]*\)/ucode/g' feeds/luci/luci.mk
+  echo "✅ 已修正 feeds/luci/luci.mk 的 ucode 依赖下限:"
+  grep -nE 'LUCI_UT_MIN_UCODE|ucode \(>=' feeds/luci/luci.mk | head -5
+else
+  echo "⚠️ feeds/luci/luci.mk 不存在, 跳过 ucode 依赖下限修正"
+fi
 grep -qE '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
 
 # ---- 强制目标设备 ----
@@ -211,6 +236,11 @@ cd "$WORK/source"
 PACK_LIST=(.ccache dl staging_dir)
 if [ "$KEEP_BUILD_DIR" = "1" ] && [ -d build_dir ]; then
   PACK_LIST+=(build_dir)
+elif [ "${KEEP_BUILD_DIR_ON_DISK:-0}" = "1" ]; then
+  # Codespace 专用: build_dir 不进 tar(否则包体暴涨), 但留在磁盘上。
+  # 动机: 2026-09-11 一轮跑完 package/install 才失败, 而 build_dir 已按老逻辑删掉 ->
+  # 下一轮等于全量重编。留着就能热续跑。
+  echo "保留 build_dir 在磁盘(不打包): $(du -sh build_dir 2>/dev/null | cut -f1)"
 else
   # ⚠️ 必须先删再打包: 旧版先把 build_dir/host* 加进 PACK_LIST 又 `rm -rf build_dir`,
   # 导致 tar 报 "Exiting with failure status due to previous errors"(文件不存在)。
