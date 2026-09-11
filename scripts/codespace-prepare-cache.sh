@@ -130,6 +130,7 @@ force_target() {
   cat >> .config <<EOF
 CONFIG_TARGET_mediatek=y
 CONFIG_TARGET_mediatek_filogic=y
+CONFIG_TARGET_mediatek_filogic_DEVICE_${DEVICE}=y
 CONFIG_TARGET_BOARD="mediatek"
 CONFIG_TARGET_SUBTARGET="filogic"
 CONFIG_TARGET_ARCH_PACKAGES="aarch64_cortex-a53"
