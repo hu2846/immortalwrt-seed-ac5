@@ -98,6 +98,26 @@ export CCACHE_DIR="$WORK/source/.ccache" CCACHE_MAXSIZE=8G CCACHE_COMPRESS=true
 python3 "$CONFIG_REPO_DIR/scripts/fix-libffi-makefile.py" feeds/packages/libs/libffi/Makefile || true
 grep -qE '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
 
+# ---- 强制目标设备 ----
+# ⚠️ 2026-09-11 实际踩坑: 不带 TARGET/PROFILE 行时 defconfig 会回落到 target 默认设备
+#    (mediatek/filogic 的默认是 openwrt_one), 结果是"编译成功但产物不是 seed-ac5"。
+DEVICE="${DEVICE:-beeconmini_seed-ac5}"
+force_target() {
+  # 删掉全部 mediatek/filogic 相关行(含 DEVICE_xxx), 再由 PROFILE 重新生成
+  sed -i -E -e '/^CONFIG_TARGET_mediatek/d' \
+            -e '/^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE|ARCH_PACKAGES|OPTIMIZATION|SUFFIX)=/d' .config
+  cat >> .config <<EOF
+CONFIG_TARGET_mediatek=y
+CONFIG_TARGET_mediatek_filogic=y
+CONFIG_TARGET_BOARD="mediatek"
+CONFIG_TARGET_SUBTARGET="filogic"
+CONFIG_TARGET_ARCH_PACKAGES="aarch64_cortex-a53"
+CONFIG_TARGET_PROFILE="DEVICE_${DEVICE}"
+CONFIG_TARGET_OPTIMIZATION="-Os -pipe -mcpu=cortex-a53"
+CONFIG_TARGET_SUFFIX="musl"
+EOF
+}
+
 log "配置收敛(与 Actions 工作流一致)"
 PREV=-1
 for i in 1 2 3 4 5 6 7 8; do
@@ -105,13 +125,27 @@ for i in 1 2 3 4 5 6 7 8; do
     sym="${line%%=*}"
     grep -qE "^${sym}=y$|^${sym}=m$" .config || echo "$line" >> .config
   done
+  force_target
   make defconfig >/dev/null 2>&1
   N=$(grep -cE '^CONFIG_PACKAGE_[a-z0-9._-]+=y' .config || true)
-  echo "第 $i 轮后 PACKAGE=y: $N"
+  DEV_NOW=$(grep -oE "^CONFIG_TARGET_[a-z0-9_]*_DEVICE_[^=]+=y" .config | head -1 | sed 's/.*DEVICE_//;s/=y//')
+  echo "第 $i 轮后 PACKAGE=y: $N (设备: ${DEV_NOW:-无})"
   [ "$N" = "$PREV" ] && { echo "配置已收敛"; break; }
   PREV=$N
 done
 grep -qE '^CONFIG_CCACHE=y' .config || echo 'CONFIG_CCACHE=y' >> .config
+
+# ---- 收敛后强校验: 设备必须正确、包数不能异常 ----
+if ! grep -qE "^CONFIG_TARGET_[a-z0-9_]*_DEVICE_${DEVICE}=y" .config; then
+  echo "❌ 设备未生效(期望 ${DEVICE})！实际: $(grep -oE '^CONFIG_TARGET_[a-z0-9_]*_DEVICE_[^=]+=y' .config | head -3 | tr '\n' ' ')"
+  echo "   此时编译只会得到错误设备的固件, 已中止。"
+  exit 1
+fi
+if [ "${N:-0}" -lt 380 ]; then
+  echo "❌ 收敛后包数异常($N < 380), 疑似配置被静默丢弃, 已中止。"
+  exit 1
+fi
+echo "✅ 配置校验通过: 设备=${DEVICE}, PACKAGE=y=${N}"
 
 # ------------------------- 编译(带磁盘看门狗) -------------------------
 run_build() {
@@ -189,6 +223,32 @@ if ! gh release view "$CACHE_RELEASE" --repo "$REPO_SLUG" >/dev/null 2>&1; then
 fi
 gh release upload "$CACHE_RELEASE" "${TARBALL}".part-* --repo "$REPO_SLUG" --clobber
 echo "✅ 缓存已上传。可删除本地大文件: rm -f $TARBALL ${TARBALL}.part-*"
+
+# ------------------------- 顺带上传固件(若本次编译真出了我们的镜像) -------------------------
+IMG_DIR="$WORK/source/bin/targets/mediatek/filogic"
+FIRMWARE_RELEASE="${FIRMWARE_RELEASE:-build-${SRC_BRANCH}}"
+if ls "$IMG_DIR"/*"${DEVICE}"* >/dev/null 2>&1; then
+  log "发现 ${DEVICE} 固件, 按 SEED-AC5-${SRC_BRANCH}-类型 命名并上传: $FIRMWARE_RELEASE"
+  STAGE="/tmp/fw-stage"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+  for f in "$IMG_DIR"/*"${DEVICE}"*; do
+    base="$(basename "$f")"; ext="${base##*.}"
+    case "$base" in
+      *squashfs-sysupgrade*) cp -f "$f" "$STAGE/SEED-AC5-${SRC_BRANCH}-squashfs-sysupgrade.${ext}";;
+      *initramfs*)           cp -f "$f" "$STAGE/SEED-AC5-${SRC_BRANCH}-initramfs.${ext}";;
+      *)                     cp -f "$f" "$STAGE/$base";;
+    esac
+  done
+  cp -f "$IMG_DIR"/mt79*-bl2.bin "$STAGE/" 2>/dev/null || true
+  ls -lh "$STAGE"
+  if ! gh release view "$FIRMWARE_RELEASE" --repo "$REPO_SLUG" >/dev/null 2>&1; then
+    gh release create "$FIRMWARE_RELEASE" --repo "$REPO_SLUG" \
+      --title "SEED AC5 ${SRC_BRANCH} (Codespace build)" --notes "由 Codespace 直接编译产出。" || true
+  fi
+  gh release upload "$FIRMWARE_RELEASE" "$STAGE"/* --repo "$REPO_SLUG" --clobber
+  echo "✅ 固件已上传到 Release: $FIRMWARE_RELEASE"
+else
+  echo "⚠️ 未找到 ${DEVICE} 的固件镜像(构建可能未完成), 跳过固件上传"
+fi
 
 if [ "${TRIGGER_BUILD:-0}" = "1" ]; then
   log "触发 Actions 热构建"
